@@ -3,6 +3,7 @@
 #include <string.h>
 #include <ctype.h>
 #include <signal.h>
+#include <libgen.h>
 #include <unistd.h>
 #include <errno.h>
 #include <sys/types.h>
@@ -88,19 +89,10 @@ int ymodem_input(ymodem_state *state, uint8_t input)
             break;
         case YMODEM_WAIT_START:
             if (input == 'C') {
-                state->packet.type = 1;
-                state->packet.seqno++;
-                state->packet.seqcpl = ~state->packet.seqno;
-                memset(state->packet.payload, 0, 128);
-                fread(state->packet.payload, 1, 128, state->input);
-                state->packet.crc = htons(crc(state->packet.payload, 128));
-                state->packet_idx = 0;
-                state->state = YMODEM_FILEDATA;
-            }
-            break;
-        case YMODEM_DATA_ACK:
-            if (input == 6) {
-                if (feof(state->input)) {
+                memset(state->packet.payload, 0x1a, 128);
+                ssize_t rx = fread(state->packet.payload, 1, 128, state->input);
+                printf("read %ld bytes from input\n", rx); fflush(stdout);
+                if (feof(state->input) || ferror(state->input)) {
                     state->packet.type = 1;
                     state->packet.seqno = 0;
                     state->packet.seqcpl = 0xff;
@@ -108,12 +100,35 @@ int ymodem_input(ymodem_state *state, uint8_t input)
                     state->packet.crc = htons(crc(state->packet.payload, 128));
                     state->packet_idx = 0;
                     state->state = YMODEM_EOT;
+                    fclose(state->input);
                 } else {
                     state->packet.type = 1;
                     state->packet.seqno++;
                     state->packet.seqcpl = ~state->packet.seqno;
+                    state->packet.crc = htons(crc(state->packet.payload, 128));
+                    state->packet_idx = 0;
+                    state->state = YMODEM_FILEDATA;
+                }
+            }
+            break;
+        case YMODEM_DATA_ACK:
+            if (input == 6) {
+                memset(state->packet.payload, 0x1a, 128);
+                ssize_t rx = fread(state->packet.payload, 1, 128, state->input);
+                printf("read %ld bytes from input\n", rx); fflush(stdout);
+                if (rx <= 0) {
+                    state->packet.type = 1;
+                    state->packet.seqno = 0;
+                    state->packet.seqcpl = 0xff;
                     memset(state->packet.payload, 0, 128);
-                    fread(state->packet.payload, 1, 128, state->input);
+                    state->packet.crc = htons(crc(state->packet.payload, 128));
+                    state->packet_idx = 0;
+                    state->state = YMODEM_EOT;
+                    fclose(state->input);
+                } else {
+                    state->packet.type = 1;
+                    state->packet.seqno++;
+                    state->packet.seqcpl = ~state->packet.seqno;
                     state->packet.crc = htons(crc(state->packet.payload, 128));
                     state->packet_idx = 0;
                     state->state = YMODEM_FILEDATA;
@@ -190,6 +205,8 @@ int ymodem_open(ymodem_state *state, char *filename)
 {
     state->input = fopen(filename, "r");
 
+    char *name = basename(filename);
+
     if (!state->input) {
         perror("fopen");
         return 0;
@@ -200,7 +217,7 @@ int ymodem_open(ymodem_state *state, char *filename)
     state->packet.seqno = 0;
     state->packet.seqcpl = 0xff;
     memset(state->packet.payload, 0, 128);
-    strncpy((char *)state->packet.payload, filename, 128);
+    strncpy((char *)state->packet.payload, name, 128);
     state->packet.crc = htons(crc(state->packet.payload, 128));
     printf("metadata packet crc = %04x\n", state->packet.crc);
     state->packet_idx = 0;
@@ -370,14 +387,14 @@ int main(int argc, const char * argv[])
                             if (console_idx == 0) write_change = EV_DISABLE;
                             state = STATE_CONSOLEIO;
                         }
-                        if (isprint(input) || input == 13 || input == 10) {
+                        if (isprint(input) || input == 13 || input == 10 || input == 8) {
                             write(STDOUT_FILENO, &input, 1);
                         } else {
                             char msg[5];
                             sprintf(msg, "<%02x>", input & 0xff);
                             write(STDOUT_FILENO, msg, 4);
                         }
-                        usleep(10000);
+                        usleep(100);
                     }
                 } else if (evList[i].filter == EVFILT_WRITE) {
                     char byte;
@@ -392,7 +409,6 @@ int main(int argc, const char * argv[])
                             break;
                         case STATE_YMODEM:
                             ymodem_output(&ym, fd);
-                            usleep(15000);
                             break;
                         case STATE_PATCHING:
                             switch (patch_state) {
@@ -418,7 +434,7 @@ int main(int argc, const char * argv[])
                                     if (write(fd, patch_data + patch_idx, 1) == 1) {
                                         byte = '.';
                                         write(STDOUT_FILENO, &byte, 1);
-                                        usleep(25000);
+                                        usleep(5000);
                                         if (++patch_idx == patch_size) {
                                             patch_state = PATCH_WAIT;
                                         }
